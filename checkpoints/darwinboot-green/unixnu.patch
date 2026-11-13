@@ -1,0 +1,51 @@
+diff --git a/drivers/DarwinBoot b/drivers/DarwinBoot
+--- a/drivers/DarwinBoot
++++ b/drivers/DarwinBoot
+@@ -1 +1 @@
+-Subproject commit d099354d0eab34df5088ca1ba89c9c88bc3260bb
++Subproject commit d099354d0eab34df5088ca1ba89c9c88bc3260bb-dirty
+diff --git a/package/UniXNUPkg/Library/UniXNULib/Boot.c b/package/UniXNUPkg/Library/UniXNULib/Boot.c
+index 4b1e737..7109a68 100644
+--- a/package/UniXNUPkg/Library/UniXNULib/Boot.c
++++ b/package/UniXNUPkg/Library/UniXNULib/Boot.c
+@@ -90,7 +90,14 @@ RunXnu (
+   Request.Kexts          = Kexts;
+   Request.KextCount      = KextCount;
+   UniXNULog ("xnu: handing off %u staged kext(s) to loader", (UINT32)KextCount);
++  if (gST->ConOut != NULL) {
++    gST->ConOut->ClearScreen (gST->ConOut);
++  }
++  Print (L"DX00 CALLING DARWINBOOT\n");
++  gBS->Stall (1000000);
+   Status = Loader->Boot (Loader, &Request);
++  Print (L"DARWINBOOT RETURNED: %r\n", Status);
++  gBS->Stall (15000000);
+   UniXNUFreeKexts (Kexts, KextCount);
+   return Status;
+ }
+diff --git a/scripts/unixnu/bootimg.py b/scripts/unixnu/bootimg.py
+index d2aa766..0d2d6e1 100644
+--- a/scripts/unixnu/bootimg.py
++++ b/scripts/unixnu/bootimg.py
+@@ -27,7 +27,7 @@ def compile_shim(uefi, base, size, requires_header, scratch):
+         raise Error(f'{source} missing: --uefi must be a Mu-Silicium checkout')
+     obj = scratch / 'shim.o'
+     run([clang, '--target=aarch64-none-elf', '-c', f'-DFD_BASE={base}', f'-DFD_SIZE={size}',
+-         f'-DREQUIRES_KERNEL_HEADER={int(requires_header)}', source, '-o', obj], capture=True)
++         f'-DREQUIRES_KERNEL_HEADER={int(requires_header)}', '-DAPPENDED_PAYLOAD_SIZE=0', source, '-o', obj], capture=True)
+     run([objcopy, '-O', 'binary', obj, scratch / 'shim.bin'], capture=True)
+     shim = (scratch / 'shim.bin').read_bytes()
+     symbols = run([nm, '-n', obj], capture=True)
+@@ -47,7 +47,11 @@ def patch_dtb(dtb, nodes, scratch):
+     work = scratch / 'device.dtb'
+     work.write_bytes(dtb)
+     for node in nodes:
+-        run([fdtput, '-c', work, node['path']], capture=True)
++        try:
++            run([fdtput, '-c', work, node['path']], capture=True)
++        except Error as error:
++            if 'FDT_ERR_EXISTS' not in str(error):
++                raise
+         for prop in node.get('props', []):
+             values = prop['value'] if isinstance(prop['value'], list) else [prop['value']]
+             run([fdtput, '-t', prop.get('type', 's'), work, node['path'], prop['name'], *[str(v) for v in values]], capture=True)

@@ -1,0 +1,300 @@
+diff --git a/BootShim/BootShim.S b/BootShim/BootShim.S
+index 4d208553..a0aa1fff 100644
+--- a/BootShim/BootShim.S
++++ b/BootShim/BootShim.S
+@@ -7,7 +7,7 @@ _StackBase:
+   .quad FD_BASE         /* Text Offset */
+ 
+ _StackSize:
+-  .quad FD_SIZE         /* Image Size */
++  .quad FD_SIZE + (_Payload - _Head) + APPENDED_PAYLOAD_SIZE /* Complete image */
+   .quad 0               /* Flags */
+   .quad 0               /* Reserved */
+   .quad 0               /* Reserved */
+@@ -30,11 +30,33 @@ _CopyLoop:
+   b.ne  _CopyLoop
+   ldr   x5, =FD_BASE
+ 
++  /* Publish the copied instructions before executing them. */
++  dsb   sy
++  mrs   x9, ctr_el0
++  ubfx  x9, x9, #16, #4
++  mov   x10, #4
++  lsl   x9, x10, x9
++  sub   x10, x9, #1
++  bic   x8, x5, x10
++  ldr   x7, =FD_SIZE
++  add   x7, x5, x7
++
++_CleanLoop:
++  dc    cvac, x8
++  add   x8, x8, x9
++  cmp   x8, x7
++  b.lo  _CleanLoop
++  dsb   sy
++  ic    iallu
++  dsb   sy
++  isb
++
+ _Entry:
+   br    x5
+ 
+ _Dead:
+   b     _Dead
++.ltorg
+ 
+ .text
+ .align 4
+diff --git a/Silicon/Silicium/SiliciumPkg/Drivers/RamManagerDxe/RamManager.c b/Silicon/Silicium/SiliciumPkg/Drivers/RamManagerDxe/RamManager.c
+index f5d3d525..523ae5b5 100644
+--- a/Silicon/Silicium/SiliciumPkg/Drivers/RamManagerDxe/RamManager.c
++++ b/Silicon/Silicium/SiliciumPkg/Drivers/RamManagerDxe/RamManager.c
+@@ -44,6 +44,7 @@
+ STATIC EFI_MEMORY_DESCRIPTOR *EfiMemoryMap     = NULL;
+ STATIC UINTN                  EfiMemoryMapSize = 0;
+ STATIC UINTN                  DescriptorSize   = 0;
++STATIC UINT8                  mRamReadyProtocol;
+ 
+ VOID
+ HandleRamRange (
+@@ -216,6 +217,13 @@ ManageRam (
+     ParseMemoryRange (MemoryRange[i].Address, (EFI_PHYSICAL_ADDRESS)(MemoryRange[i].Address + MemoryRange[i].Length));
+   }
+ 
++  if (!EFI_ERROR (Status)) {
++    EFI_HANDLE  Handle = NULL;
++
++    Status = gBS->InstallProtocolInterface (&Handle, &gSiliciumRamReadyProtocolGuid,
++                                            EFI_NATIVE_INTERFACE, &mRamReadyProtocol);
++  }
++
+ cleanup:
+   // Free EFI Memory Map Buffer
+   if (EfiMemoryMap != NULL) {
+diff --git a/Silicon/Silicium/SiliciumPkg/Drivers/RamManagerDxe/RamManagerDxe.inf b/Silicon/Silicium/SiliciumPkg/Drivers/RamManagerDxe/RamManagerDxe.inf
+index 388969bb..9c0fd1ba 100644
+--- a/Silicon/Silicium/SiliciumPkg/Drivers/RamManagerDxe/RamManagerDxe.inf
++++ b/Silicon/Silicium/SiliciumPkg/Drivers/RamManagerDxe/RamManagerDxe.inf
+@@ -23,5 +23,8 @@
+   RamManagerLib
+   SortLib
+ 
++[Protocols]
++  gSiliciumRamReadyProtocolGuid
++
+ [Depex]
+   TRUE
+diff --git a/Silicon/Silicium/SiliciumPkg/Sec/AArch64/Helper.S b/Silicon/Silicium/SiliciumPkg/Sec/AArch64/Helper.S
+index 053012de..e8df3ac9 100644
+--- a/Silicon/Silicium/SiliciumPkg/Sec/AArch64/Helper.S
++++ b/Silicon/Silicium/SiliciumPkg/Sec/AArch64/Helper.S
+@@ -44,4 +44,63 @@ ASM_FUNC (SetupExceptionLevel2)
+ 
+   ret
+ 
++//
++// Cleans and invalidates every data cache level up to the Level of Coherence by set/way (the standard sequence: CLIDR_EL1 levels,
++// CSSELR_EL1 to select, CCSIDR_EL1 geometry, DC CISW). The previous stage ran with its caches on and leaves lines behind that the UEFI,
++// running with the MMU and caches off until ArmConfigureMmu, never wrote: once the caches are on, those stale lines would hide the
++// DRAM contents (HOB tables, heap) written in between, or be written back over them. Cleaning keeps what the previous stage wrote.
++// Corrupts x0-x11; callable with the MMU on or off.
++//
++ASM_FUNC (SecCleanInvalidateDataCacheAll)
++  dmb   sy
++  mrs   x0, clidr_el1
++  and   x3, x0, #0x7000000          // LoC, shifted
++  lsr   x3, x3, #23                 // LoC * 2
++  cbz   x3, 5f
++  mrs   x1, id_aa64mmfr2_el1
++  ubfx  x8, x1, #20, #4             // CCIDX
++  mov   x10, #0                     // level * 2
++1:
++  add   x2, x10, x10, lsr #1
++  lsr   x1, x0, x2
++  and   x1, x1, #7                  // cache type of this level
++  cmp   x1, #2
++  b.lt  4f                          // no data cache here
++  msr   csselr_el1, x10
++  isb
++  mrs   x1, ccsidr_el1
++  and   x2, x1, #7
++  add   x2, x2, #4                  // log2 (line bytes)
++  cbz   x8, 6f
++  ubfx  x4, x1, #3, #21             // CCIDX: associativity - 1
++  ubfx  x7, x1, #32, #24            // CCIDX: sets - 1
++  b     7f
++6:
++  ubfx  x4, x1, #3, #10             // associativity - 1
++  ubfx  x7, x1, #13, #15            // sets - 1
++7:
++  clz   w5, w4                      // bit position of the way field
++2:
++  mov   x9, x4
++3:
++  lsl   x6, x9, x5
++  orr   x11, x10, x6                // way and level
++  lsl   x6, x7, x2
++  orr   x11, x11, x6                // set
++  dc    cisw, x11
++  subs  x9, x9, #1
++  b.ge  3b
++  subs  x7, x7, #1
++  b.ge  2b
++4:
++  add   x10, x10, #2
++  cmp   x3, x10
++  b.gt  1b
++5:
++  mov   x10, #0
++  msr   csselr_el1, x10
++  dsb   sy
++  isb
++  ret
++
+ ASM_FUNCTION_REMOVE_IF_UNREFERENCED
+diff --git a/Silicon/Silicium/SiliciumPkg/Sec/AArch64/ModuleEntryPoint.S b/Silicon/Silicium/SiliciumPkg/Sec/AArch64/ModuleEntryPoint.S
+index 0c05ffa3..e718752b 100644
+--- a/Silicon/Silicium/SiliciumPkg/Sec/AArch64/ModuleEntryPoint.S
++++ b/Silicon/Silicium/SiliciumPkg/Sec/AArch64/ModuleEntryPoint.S
+@@ -13,6 +13,22 @@
+ .set CTRL_SPAN_BIT, BIT23
+ 
+ ASM_FUNC (_ModuleEntryPoint)
++  // Before the first store of this stage: clean and invalidate the data caches the previous stage filled (x0 is kept in x20).
++  mov   x20, x0
++  mov   x21, x1
++  mov   x22, x2
++  bl    ASM_PFX (SecCleanInvalidateDataCacheAll)
++  mov   x0, x20
++
++  // Keep x0 for the platform. It is the address of the DT a Linux-style boot
++  // loader hands over. The slot is in this section, which is in RAM here.
++  adr   x1, ASM_PFX (gSecEntryArg0)
++  str   x0, [x1]
++  adr   x1, ASM_PFX (gSecPayloadAddress)
++  str   x21, [x1]
++  adr   x1, ASM_PFX (gSecPayloadSize)
++  str   x22, [x1]
++
+   // Do Platform Specific Initialization
+   bl    ASM_PFX (PlatformAssemblyInitialize)
+ 
+@@ -61,3 +77,17 @@ ASM_PFX (MainEntryPoint):
+ 
+   // Do Infinite Spin
+   b     .
++
++  // First argument of the previous stage, written once at entry
++  .align 3
++  .global ASM_PFX (gSecEntryArg0)
++ASM_PFX (gSecEntryArg0):
++  .quad 0
++
++  .align 3
++  .global ASM_PFX (gSecPayloadAddress)
++ASM_PFX (gSecPayloadAddress):
++  .quad 0
++  .global ASM_PFX (gSecPayloadSize)
++ASM_PFX (gSecPayloadSize):
++  .quad 0
+diff --git a/Silicon/Silicium/SiliciumPkg/Sec/Sec.c b/Silicon/Silicium/SiliciumPkg/Sec/Sec.c
+index 8d586b35..5d47245a 100644
+--- a/Silicon/Silicium/SiliciumPkg/Sec/Sec.c
++++ b/Silicon/Silicium/SiliciumPkg/Sec/Sec.c
+@@ -18,6 +18,16 @@
+ 
+ #include "Sec.h"
+ 
++// First argument (x0) of the previous stage, saved by ModuleEntryPoint.S
++extern UINT64  gSecEntryArg0;
++extern UINT64  gSecPayloadAddress;
++extern UINT64  gSecPayloadSize;
++
++VOID
++SecCleanInvalidateDataCacheAll (
++  VOID
++  );
++
+ #ifndef MDEPKG_NDEBUG
+ STATIC
+ VOID
+@@ -118,6 +128,19 @@ SecMain (VOID)
+     return;
+   }
+ 
++  // Pass on what the previous stage handed over in x0 (a DT address for a
++  // Linux-style boot loader), so a DXE driver can use it.
++  {
++    UINT64  EntryArg = gSecEntryArg0;
++
++    BuildGuidDataHob (&gSiliciumEntryArgHobGuid, &EntryArg, sizeof (EntryArg));
++  }
++  if (gSecPayloadSize != 0) {
++    UINT64  Payload[2] = { gSecPayloadAddress, gSecPayloadSize };
++
++    BuildGuidDataHob (&gSiliciumAppendedPayloadHobGuid, Payload, sizeof (Payload));
++  }
++
+   // Build CPU HOB
+   BuildCpuHob (ArmGetPhysicalAddressBits (), PcdGet8 (PcdPrePiCpuIoSize));
+ 
+@@ -150,6 +173,10 @@ SecMain (VOID)
+ VOID
+ SecEntry (VOID)
+ {
++  // The previous stage ran with its caches on. Clean and invalidate them before anything else: the UEFI writes its HOB tables and heap with
++  // the MMU and caches off, and lines the previous stage left would hide those writes (or be written back over them) once the caches are on.
++  SecCleanInvalidateDataCacheAll ();
++
+   // Disable Data Cache
+   ArmDisableDataCache ();
+ 
+diff --git a/Silicon/Silicium/SiliciumPkg/Sec/Sec.inf b/Silicon/Silicium/SiliciumPkg/Sec/Sec.inf
+index 79afd196..610c4cf9 100644
+--- a/Silicon/Silicium/SiliciumPkg/Sec/Sec.inf
++++ b/Silicon/Silicium/SiliciumPkg/Sec/Sec.inf
+@@ -52,6 +52,8 @@
+ 
+ [Guids]
+   gArmMpCoreInfoGuid
++  gSiliciumEntryArgHobGuid
++  gSiliciumAppendedPayloadHobGuid
+ 
+ [Pcd]
+   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString
+diff --git a/Silicon/Silicium/SiliciumPkg/SiliciumPkg.dec b/Silicon/Silicium/SiliciumPkg/SiliciumPkg.dec
+index 99cd6975..eaec48a1 100644
+--- a/Silicon/Silicium/SiliciumPkg/SiliciumPkg.dec
++++ b/Silicon/Silicium/SiliciumPkg/SiliciumPkg.dec
+@@ -10,8 +10,15 @@
+ [Guids]
+   gSiliciumPkgTokenSpaceGuid          = { 0x055720A6, 0xA739, 0x0047, { 0xBE, 0xC1, 0x67, 0xFC, 0x38, 0x34, 0x54, 0x53 } }
+ 
++  # HOB holding the first argument (x0) the previous stage entered SEC with.
++  # A Linux-style boot loader passes the physical address of a flattened DT.
++  gSiliciumEntryArgHobGuid            = { 0xDAEE82E6, 0x8090, 0x4E72, { 0xBF, 0xB9, 0x78, 0xC1, 0x3C, 0xD4, 0xE3, 0x59 } }
++  gSiliciumAppendedPayloadHobGuid     = { 0x31D1E4E5, 0x9B11, 0x4B44, { 0x8F, 0x93, 0x31, 0xFF, 0x68, 0xDB, 0x47, 0xB8 } }
++
+ [Protocols]
+   gKeypadDeviceProtocolGuid           = { 0xA412C1AC, 0x0295, 0x4AE3, { 0xB5, 0x9F, 0x52, 0x23, 0x1F, 0x26, 0x55, 0x4D } }
++  # Installed after RamManagerDxe has mapped all usable DRAM.
++  gSiliciumRamReadyProtocolGuid       = { 0x7DABE6D8, 0x4B62, 0x4E47, { 0xA8, 0x71, 0x36, 0x0D, 0x8C, 0x25, 0x93, 0x51 } }
+ 
+ [PcdsFixedAtBuild]
+   #
+diff --git a/Silicon/Silicium/SiliciumPkg/SiliciumPkg.dsc.inc b/Silicon/Silicium/SiliciumPkg/SiliciumPkg.dsc.inc
+index d631806a..4eb99187 100644
+--- a/Silicon/Silicium/SiliciumPkg/SiliciumPkg.dsc.inc
++++ b/Silicon/Silicium/SiliciumPkg/SiliciumPkg.dsc.inc
+@@ -393,7 +393,10 @@
+   #
+   # PCD Database
+   #
+-  MdeModulePkg/Universal/PCD/Dxe/Pcd.inf
++  MdeModulePkg/Universal/PCD/Dxe/Pcd.inf {
++    <LibraryClasses>
++      PcdLib|MdePkg/Library/BasePcdLibNull/BasePcdLibNull.inf
++  }
+ 
+   #
+   # Processor Core Services

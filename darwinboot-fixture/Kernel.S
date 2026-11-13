@@ -21,10 +21,10 @@ _start:
   b.ne fail
 
   ldr x4, [x0, #0x28]       // framebuffer physical address
-  ldr x5, [x0, #0x30]       // row bytes
-  ldr x6, [x0, #0x38]       // width
-  ldr x7, [x0, #0x40]       // height
-  ldr x8, [x0, #0x48]       // bits per pixel
+  ldr x5, [x0, #0x38]       // row bytes
+  ldr x6, [x0, #0x40]       // width
+  ldr x7, [x0, #0x48]       // height
+  ldr x8, [x0, #0x50]       // bits per pixel
   cbz x4, fail
   cbz x5, fail
   cbz x6, fail
@@ -53,8 +53,8 @@ fail:
   // is unusable there is no safe display output, so only spin.
   cbz x0, hang
   ldr x4, [x0, #0x28]
-  ldr x5, [x0, #0x30]
-  ldr x7, [x0, #0x40]
+  ldr x5, [x0, #0x38]
+  ldr x7, [x0, #0x48]
   cbz x4, hang
   cbz x5, hang
   cbz x7, hang

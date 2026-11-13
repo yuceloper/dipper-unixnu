@@ -1,0 +1,236 @@
+diff --git a/DarwinBootPkg/Driver/DarwinBoot.c b/DarwinBootPkg/Driver/DarwinBoot.c
+index 25ce2d2..5cb8e26 100644
+--- a/DarwinBootPkg/Driver/DarwinBoot.c
++++ b/DarwinBootPkg/Driver/DarwinBoot.c
+@@ -413,25 +413,50 @@ AllocateWindow (KERNEL *Kernel, UINT64 WindowSize, EFI_PHYSICAL_ADDRESS *Address
+   UINT64                BestStart;
+   UINT64                BestBytes;
+   UINT64                RunBytes;
++  CHAR16                Trace[128];
+ 
+   *Address = 0;
+   Map = NULL;
+   Capacity = 0;
+   BestStart = 0;
+   BestBytes = 0;
++  DiagDraw (L"AW01 GET MEMORY MAP", 7);
+   Status = GetMap (&Map, &Capacity, &Size, &Key, &Stride);
++  UnicodeSPrint (Trace, sizeof (Trace), L"AW02 MAP %r SIZE %lu STRIDE %lu",
++                 Status, (UINT64)Size, (UINT64)Stride);
++  DiagDraw (Trace, 8);
+   if (EFI_ERROR (Status)) { if (Map != NULL) { FreePool (Map); } return Status; }
+   Status = EFI_OUT_OF_RESOURCES;
+   for (Offset = 0; Offset + Stride <= Size; Offset += Stride) {
+     Descriptor = (EFI_MEMORY_DESCRIPTOR *)((UINT8 *)Map + Offset);
+     if ((Descriptor->Type != EfiConventionalMemory) || (Descriptor->NumberOfPages == 0)) { continue; }
++    UnicodeSPrint (Trace, sizeof (Trace), L"AW03 SCAN %lx PAGES %lu",
++                   Descriptor->PhysicalStart, (UINT64)Descriptor->NumberOfPages);
++    DiagDraw (Trace, 9);
+     End = RunEnd (Map, Size, Stride, Descriptor->PhysicalStart,
+                   Descriptor->PhysicalStart + EFI_PAGES_TO_SIZE (Descriptor->NumberOfPages));
++    DiagDraw (L"AW04 RUN SCAN RETURNED", 10);
+     RunBytes = End - Descriptor->PhysicalStart;
+     if (RunBytes > BestBytes) { BestBytes = RunBytes; BestStart = Descriptor->PhysicalStart; }
+-    Candidate = ALIGN_VALUE (Descriptor->PhysicalStart, BLOCK_SIZE) + (Kernel->Base & (BLOCK_SIZE - 1));
++    // Diagnostic 32 MiB fixture: use only free memory inside the static DXE heap.
++    if (WindowSize <= 0x02000000ULL) {
++      if ((End <= 0x97c00000ULL) ||
++          (Descriptor->PhysicalStart >= 0x9d330000ULL)) { continue; }
++      End = MIN (End, 0x9d330000ULL);
++      Candidate = MAX (Descriptor->PhysicalStart, 0x97c00000ULL);
++    } else {
++      Candidate = Descriptor->PhysicalStart;
++    }
++    Candidate = ALIGN_VALUE (Candidate, BLOCK_SIZE) + (Kernel->Base & (BLOCK_SIZE - 1));
+     if ((Candidate < Descriptor->PhysicalStart) || (End < Candidate) || (End - Candidate < WindowSize)) { continue; }
+-    Status = gBS->AllocatePages (AllocateAddress, EfiLoaderCode, EFI_SIZE_TO_PAGES (WindowSize), &Candidate);
++    UnicodeSPrint (Trace, sizeof (Trace), L"AW05 ALLOC %lx BYTES %lx",
++                   Candidate, WindowSize);
++    DiagDraw (Trace, 11);
++    // The kernel window is populated as data. DarwinEnter disables
++    // the MMU before branching into it.
++    Status = gBS->AllocatePages (AllocateAddress, EfiLoaderData, EFI_SIZE_TO_PAGES (WindowSize), &Candidate);
++    UnicodeSPrint (Trace, sizeof (Trace), L"AW06 RETURNED %r", Status);
++    DiagDraw (Trace, 12);
+     if (!EFI_ERROR (Status)) { *Address = Candidate; break; }
+   }
+   if (EFI_ERROR (Status)) {
+@@ -503,6 +528,7 @@ Boot (
+   UINT64                          Video[6];
+ 
+   (VOID)This;
++  DiagDraw (L"DB01 ENTERED LOADER", 0);
+   if ((Request == NULL) || (Request->Volume == NULL) || (Request->KernelPath == NULL)) { return EFI_INVALID_PARAMETER; }
+   if ((Request->KextCount != 0) || (Request->DeviceTree != NULL) || (Request->DeviceTreeSize != 0) ||
+       (DarwinCurrentEl () != 4)) {
+@@ -537,8 +563,10 @@ Boot (
+   if (EFI_ERROR (Status)) { return Status; }
+   Status = Fs->OpenVolume (Fs, &Root);
+   if (EFI_ERROR (Status)) { return Status; }
++  DiagDraw (L"DB02 READ MACHO", 1);
+   Status = ReadFile (Root, Request->KernelPath, SIZE_128MB, &Image, &ImageSize);
+   if (EFI_ERROR (Status)) { goto Fail; }
++  DiagDraw (L"DB03 PARSE MACHO", 2);
+   Status = ParseKernel (Image, ImageSize, &Kernel);
+   if (EFI_ERROR (Status)) { goto Fail; }
+   Length = StrSize (Request->KernelPath);
+@@ -546,6 +574,7 @@ Boot (
+   if (TreePath == NULL) { Status = EFI_OUT_OF_RESOURCES; goto Fail; }
+   CopyMem (TreePath, Request->KernelPath, Length);
+   StrCatS (TreePath, Length / sizeof (CHAR16) + 11, L".adt");
++  DiagDraw (L"DB04 READ ADT", 3);
+   Status = ReadFile (Root, TreePath, SIZE_16MB, &Tree, &TreeSize);
+   if (EFI_ERROR (Status)) { goto Fail; }
+   Offset = 0;
+@@ -557,6 +586,12 @@ Boot (
+   if (!AdtNode (Tree, TreeSize, &Offset, 0, 3, &RamdiskOffset, &TrustCacheOffset, &AddonOffset, &WindowSize, &KeepPacked) || (Offset != TreeSize)) { Status = EFI_COMPROMISED_DATA; goto Fail; }
+   if (KeepPacked && (!RamdiskPacked || (RamdiskOffset == MAX_UINTN))) { Status = EFI_COMPROMISED_DATA; goto Fail; }
+   if (WindowSize == 0) { WindowSize = WINDOW_SIZE; }
++  // Explicit override for the tiny synthetic handoff fixture only.
++  if ((AsciiStrStr (CommandLine, "dipper-darwinboot-fixture=1") != NULL) &&
++      (WindowSize == 0x02000000ULL)) {
++    WindowSize = 0x01000000ULL;
++    DiagDraw (L"FIXTURE WINDOW 16 MIB", 6);
++  }
+   if (Kernel.Base > MAX_UINT64 - WindowSize) { Status = EFI_LOAD_ERROR; goto Fail; }
+   if (Request->Ramdisk != NULL) {
+     if ((RamdiskOffset == MAX_UINTN) || (U64 ((UINT8 *)Tree + RamdiskOffset) != 0) ||
+@@ -599,7 +634,9 @@ Boot (
+   }
+   Status = ReadBootVideo (Video);
+   if (EFI_ERROR (Status)) { goto Fail; }
++  DiagDraw (L"DB05 ALLOCATE WINDOW", 4);
+   Status = AllocateWindow (&Kernel, WindowSize, &Address);
++  DiagDraw (L"DB06 ALLOCATION RETURNED", 5);
+   if (EFI_ERROR (Status)) { goto Fail; }
+   ArgsAddress = ALIGN_VALUE (Address + Kernel.End - Kernel.Base, SIZE_16KB);
+   TreeAddress = ArgsAddress + EFI_PAGE_SIZE;
+@@ -613,11 +650,40 @@ Boot (
+     Status = EFI_BAD_BUFFER_SIZE;
+     goto Fail;
+   }
+-  ZeroMem ((VOID *)(UINTN)Address, (UINTN)Used);
++  DiagDraw (L"DB07 COPY INPUTS", 6);
++  {
++    CHAR16 Line[128];
++    UnicodeSPrint (Line, sizeof (Line), L"CP01 ZERO %lx BYTES %lx", Address, Used);
++    DiagDraw (Line, 13);
++  }
++  {
++    volatile UINT8 *Bytes = (volatile UINT8 *)(UINTN)Address;
++    UINTN ByteIndex;
++    UINT8 Probe;
++    DiagDraw (L"PR01 FIRST BYTE WRITE", 13);
++    Bytes[0] = 0;
++    Probe = Bytes[0];
++    if (Probe != 0) {
++      DiagDraw (L"PR02 READBACK FAILED", 14);
++      CpuDeadLoop ();
++    }
++    DiagDraw (L"PR02 FIRST BYTE OK", 14);
++    DiagDraw (L"PR03 BYTE ZERO LOOP", 15);
++    for (ByteIndex = 0; ByteIndex < (UINTN)Used; ByteIndex++) {
++      Bytes[ByteIndex] = 0;
++    }
++    DiagDraw (L"PR04 BYTE ZERO COMPLETE", 15);
++  }
++  DiagDraw (L"CP02 ZERO COMPLETE", 14);
+   for (Index = 0; Index < Kernel.Count; Index++) {
++    CHAR16 Line[128];
++    UnicodeSPrint (Line, sizeof (Line), L"CP03 SEGMENT %lu SIZE %lx",
++                   (UINT64)Index, Kernel.Segments[Index].FileSize);
++    DiagDraw (Line, 15);
+     CopyMem ((VOID *)(UINTN)(Address + Kernel.Segments[Index].Address - Kernel.Base),
+              (UINT8 *)Image + Kernel.Segments[Index].FileOffset, (UINTN)Kernel.Segments[Index].FileSize);
+   }
++  DiagDraw (L"CP04 SEGMENTS COMPLETE", 16);
+   Args = (DARWIN_BOOT_ARGS *)(UINTN)ArgsAddress;
+   Args->Revision = 2;
+   Args->Version = 2;
+@@ -630,7 +696,9 @@ Boot (
+   Args->DeviceTree = Kernel.Base + TreeAddress - Address;
+   Args->DeviceTreeLength = (UINT32)TreeSize;
+   CopyMem (Args->CommandLine, CommandLine, sizeof (CommandLine));
++  DiagDraw (L"CP05 COPY ADT", 17);
+   CopyMem ((VOID *)(UINTN)TreeAddress, Tree, TreeSize);
++  DiagDraw (L"CP06 ADT COPIED", 18);
+   if (Request->Ramdisk != NULL) {
+     if (KeepPacked) { CopyMem ((VOID *)(UINTN)RamdiskAddress, Request->Ramdisk, Request->RamdiskSize); }
+     else { CopyRamdisk ((VOID *)(UINTN)RamdiskAddress, Request->Ramdisk, Request->RamdiskSize, RamdiskPacked); }
+@@ -652,7 +720,9 @@ Boot (
+   FreePool (Image); Image = NULL;
+   FreePool (Tree); Tree = NULL;
+   FreePool (TreePath); TreePath = NULL;
++  DiagDraw (L"CP07 CLOSE FILES", 19);
+   Root->Close (Root); Root = NULL;
++  DiagDraw (L"CP08 GET FINAL MAP", 20);
+   Status = GetMap (&Map, &Capacity, &MapSize, &Key, &Stride);
+   if (EFI_ERROR (Status)) { goto Fail; }
+   Print (L"DARWINBOOT: ARM64 va=0x%lx pa=0x%lx args=0x%lx entry=0x%lx owned=0x%lx\n",
+diff --git a/DarwinBootPkg/Driver/Entry.S b/DarwinBootPkg/Driver/Entry.S
+index 890d4df..a48cc06 100644
+--- a/DarwinBootPkg/Driver/Entry.S
++++ b/DarwinBootPkg/Driver/Entry.S
+@@ -9,6 +9,8 @@ ASM_FUNC(DarwinCurrentEl)
+ // PA (0 for none), x5=its size in bytes. EL1 only.
+ ASM_FUNC(DarwinEnter)
+   msr daifset, #15
++  mov x12, x4
++  mov x13, x5
+   // Breadcrumb: a green bar (BGRA 0xFF00FF00) over the top 1/16 of the frame
+   // buffer shows that this code ran, whatever the kernel does afterwards.
+   cbz x4, 2f
+@@ -40,6 +42,21 @@ ASM_FUNC(DarwinEnter)
+   ic iallu
+   dsb sy
+   isb
++
++  // Diagnostic framebuffer marker; preserve boot arguments x0-x3.
++  cbz x12, .Lcache_done_done
++  lsr x9, x13, #4
++  bic x9, x9, #7
++  cbz x9, .Lcache_done_done
++  mov w10, #0x00ff
++  movk w10, #0xffff, lsl #16
++  mov x11, x12
++.Lcache_done_loop:
++  stp w10, w10, [x11], #8
++  subs x9, x9, #8
++  b.hi .Lcache_done_loop
++  dsb sy
++.Lcache_done_done:
+   mrs x4, sctlr_el1
+   bic x4, x4, #1
+   bic x4, x4, #4
+@@ -49,4 +66,19 @@ ASM_FUNC(DarwinEnter)
+   tlbi vmalle1
+   dsb sy
+   isb
++
++  // Diagnostic framebuffer marker; preserve boot arguments x0-x3.
++  cbz x12, .Lmmu_off_done
++  lsr x9, x13, #4
++  bic x9, x9, #7
++  cbz x9, .Lmmu_off_done
++  mov w10, #0xffff
++  movk w10, #0xff00, lsl #16
++  mov x11, x12
++.Lmmu_off_loop:
++  stp w10, w10, [x11], #8
++  subs x9, x9, #8
++  b.hi .Lmmu_off_loop
++  dsb sy
++.Lmmu_off_done:
+   br x1
+diff --git a/DarwinBootPkg/Driver/WindowSize.h b/DarwinBootPkg/Driver/WindowSize.h
+index 055549a..18d6628 100644
+--- a/DarwinBootPkg/Driver/WindowSize.h
++++ b/DarwinBootPkg/Driver/WindowSize.h
+@@ -4,6 +4,6 @@
+ // Allocation still requires one real conventional-memory run. This is a
+ // parser bound, never a declaration of available RAM or an allocation fallback.
+ static inline int DarwinWindowSizeValid(unsigned long long size) {
+-  return size >= 0x10000000ULL && size <= 0x200000000ULL && !(size & 0x1fffffULL);
++  return (size == 0x02000000ULL || size >= 0x10000000ULL) && size <= 0x200000000ULL && !(size & 0x1fffffULL);
+ }
+ #endif

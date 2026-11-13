@@ -1,0 +1,2 @@
+4c6124626f5729b97041c6664622cd45433a8cfbb757a8a0677a204fdab15c6e  milestones/darwinboot-green/boot.img
+d769017f350a8b0ae9b905ad47196b610cfd6fdee34bcbee098cb88dca3811d9  milestones/darwinboot-green/logfs.img

@@ -310,7 +310,6 @@ STATIC RAM_BLOCK_DEVICE_PATH  mDevicePath = {
 
 STATIC UINT8                    *mRamBase;
 STATIC EFI_BLOCK_IO_MEDIA       mMedia;
-STATIC VOID                     *mFvPayload;
 
 STATIC
 EFI_STATUS
@@ -598,7 +597,6 @@ PublishEmbeddedPayload (
     return EFI_COMPROMISED_DATA;
   }
 
-  mFvPayload = Buffer;
   return PublishBlock ((UINT64)(UINTN)Buffer, PayloadSize, "embedded FV payload", TRUE);
 }
 

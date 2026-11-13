@@ -1,0 +1,50 @@
+diff --git a/darwinboot-fixture/Kernel.S b/darwinboot-fixture/Kernel.S
+index 5a0346f..baf5dcf 100644
+--- a/darwinboot-fixture/Kernel.S
++++ b/darwinboot-fixture/Kernel.S
+@@ -21,10 +21,10 @@ _start:
+   b.ne fail
+ 
+   ldr x4, [x0, #0x28]       // framebuffer physical address
+-  ldr x5, [x0, #0x30]       // row bytes
+-  ldr x6, [x0, #0x38]       // width
+-  ldr x7, [x0, #0x40]       // height
+-  ldr x8, [x0, #0x48]       // bits per pixel
++  ldr x5, [x0, #0x38]       // row bytes
++  ldr x6, [x0, #0x40]       // width
++  ldr x7, [x0, #0x48]       // height
++  ldr x8, [x0, #0x50]       // bits per pixel
+   cbz x4, fail
+   cbz x5, fail
+   cbz x6, fail
+@@ -53,8 +53,8 @@ fail:
+   // is unusable there is no safe display output, so only spin.
+   cbz x0, hang
+   ldr x4, [x0, #0x28]
+-  ldr x5, [x0, #0x30]
+-  ldr x7, [x0, #0x40]
++  ldr x5, [x0, #0x38]
++  ldr x7, [x0, #0x48]
+   cbz x4, hang
+   cbz x5, hang
+   cbz x7, hang
+diff --git a/uefi/DipperBootMemoryDxe/DipperBootMemoryDxe.c b/uefi/DipperBootMemoryDxe/DipperBootMemoryDxe.c
+index 4efbec8..79cfa09 100644
+--- a/uefi/DipperBootMemoryDxe/DipperBootMemoryDxe.c
++++ b/uefi/DipperBootMemoryDxe/DipperBootMemoryDxe.c
+@@ -310,7 +310,6 @@ STATIC RAM_BLOCK_DEVICE_PATH  mDevicePath = {
+ 
+ STATIC UINT8                    *mRamBase;
+ STATIC EFI_BLOCK_IO_MEDIA       mMedia;
+-STATIC VOID                     *mFvPayload;
+ 
+ STATIC
+ EFI_STATUS
+@@ -598,7 +597,6 @@ PublishEmbeddedPayload (
+     return EFI_COMPROMISED_DATA;
+   }
+ 
+-  mFvPayload = Buffer;
+   return PublishBlock ((UINT64)(UINTN)Buffer, PayloadSize, "embedded FV payload", TRUE);
+ }
+ 
